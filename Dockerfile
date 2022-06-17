@@ -1,0 +1,51 @@
+FROM docker.io/louislam/uptime-kuma:1.16.1-debian@sha256:f5706f21ba0af08775505aeddf61aff1d344038f6df5a90865699b86677dfd99 AS app-donor
+
+FROM docker.io/node:16.15.1-bullseye-slim@sha256:8265ac132f720998222008355e11535caf53d6bccecbb562a055605138975b4e
+
+ARG UID=3310
+ARG GID=3310
+
+# renovate: datasource=pypi depName=apprise versioning=pep440
+ARG APPRISE_VERSION=0.9.9
+
+# renovate: datasource=github-releases depName=cloudflare/cloudflared
+ARG CLOUDFLARED_VERSION=2022.6.1
+
+COPY --from=app-donor /app /app
+
+RUN apt-get update -qqy \
+    # Install Uptime-Kuma dependencies
+    && apt-get install --no-install-recommends -qqy \
+        python3 python3-pip python3-cryptography python3-six python3-yaml python3-click python3-markdown python3-requests python3-requests-oauthlib \
+        sqlite3 iputils-ping util-linux dumb-init curl ca-certificates bash \
+    && pip3 --no-cache-dir install apprise==${APPRISE_VERSION} \
+    && rm -rf /var/lib/apt/lists/* \
+    \
+    # Download and install cloudflared
+    && ARCH= && dpkgArch="$(dpkg --print-architecture)" \
+    && case "${dpkgArch##*-}" in \
+      amd64) ARCH='amd64';; \
+      arm64) ARCH='arm64';; \
+      armhf) ARCH='arm';; \
+      *) echo "unsupported architecture"; exit 1 ;; \
+    esac \
+    && curl -fsSLo /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH} \
+    && chmod +x /usr/local/bin/cloudflared \
+    \
+    # Setup non-root system account + group
+    && addgroup --system --gid ${GID} uptime-kuma || true \
+    && adduser --system --disabled-login --ingroup uptime-kuma --no-create-home --home /nonexistent --gecos "uptime-kuma" --shell /bin/false --uid ${UID} uptime-kuma || true \
+    && mkdir -p /app/data \
+    && chown -R uptime-kuma:0 /app \
+    && chmod -R g=u /app \
+    \
+    # Smoke Tests
+    && set -ex; \
+      cloudflared version; \
+      apprise --version;
+
+WORKDIR /app
+USER uptime-kuma
+EXPOSE 3001
+VOLUME ["/app/data"]
+CMD ["/usr/bin/dumb-init", "--", "node", "server/server.js"]
